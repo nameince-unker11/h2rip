@@ -182,7 +182,7 @@ tr:hover td{background:#1a1a24}
 <div id="toast" class="toast hidden"></div>
 
 <script>
-let PASS='';
+let PASS=sessionStorage.getItem('riphack_pass')||'';
 const API=window.location.origin;
 
 function showToast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.remove('hidden');setTimeout(()=>t.classList.add('hidden'),2500)}
@@ -198,7 +198,8 @@ async function doLogin(){
   PASS=document.getElementById('passInput').value;
   try{
     const r=await api('GET','/admin/keys');
-    if(r.error){document.getElementById('loginErr').textContent='Wrong password';document.getElementById('loginErr').classList.remove('hidden');return}
+    if(r.error){document.getElementById('loginErr').textContent='Wrong password';document.getElementById('loginErr').classList.remove('hidden');PASS='';return}
+    sessionStorage.setItem('riphack_pass',PASS);
     document.getElementById('loginSection').classList.add('hidden');
     document.getElementById('mainSection').classList.remove('hidden');
     renderKeys(r.keys);
@@ -229,6 +230,9 @@ async function deleteKey(k){try{const r=await api('POST','/admin/delete',{key:k}
 async function resetKey(k){try{const r=await api('POST','/admin/reset',{key:k});showToast(r.status==='reset'?'HWID reset!':'Error: '+r.status);await loadKeys()}catch(e){showToast('Error: '+e.message)}}
 
 document.getElementById('passInput').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin()});
+
+// Auto-login if password saved in session
+if(PASS){api('GET','/admin/keys').then(r=>{if(!r.error){document.getElementById('loginSection').classList.add('hidden');document.getElementById('mainSection').classList.remove('hidden');renderKeys(r.keys)}else{PASS='';sessionStorage.removeItem('riphack_pass')}}).catch(()=>{})}
 </script>
 </body>
 </html>`);
