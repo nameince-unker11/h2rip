@@ -39,16 +39,14 @@ app.post('/validate', (req, res) => {
   const entry = db.keys[key];
   if (!entry) return res.json({ status: 'invalid' });
 
-  const serverKey = getServerKey();
-
   if (!entry.hwid) {
     entry.hwid = hwid;
     entry.activatedAt = new Date().toISOString();
     db.keys[key] = entry;
     saveDB(db);
-    return res.json({ status: 'activated', server_key: serverKey });
+    return res.json({ status: 'activated' });
   }
-  if (entry.hwid === hwid) return res.json({ status: 'ok', server_key: serverKey });
+  if (entry.hwid === hwid) return res.json({ status: 'ok' });
   return res.json({ status: 'bound' });
 });
 
@@ -59,8 +57,7 @@ app.post('/check', (req, res) => {
   const db = loadDB();
   const entry = db.keys[key];
   const isValid = !!(entry && entry.hwid === hwid);
-  const serverKey = isValid ? getServerKey() : '';
-  return res.json({ valid: isValid, server_key: serverKey });
+  return res.json({ valid: isValid });
 });
 
 // ===== ADMIN: Авторизация =====
