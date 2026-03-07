@@ -222,11 +222,11 @@ function renderKeys(keys){
   </tr>\`).join('');
 }
 
-async function loadKeys(){const r=await api('GET','/admin/keys');renderKeys(r.keys);showToast('Refreshed')}
-async function generateKeys(){const c=parseInt(document.getElementById('genCount').value)||5;const r=await api('POST','/admin/generate',{count:c});showToast(c+' keys generated');loadKeys()}
-async function addKey(){const k=document.getElementById('addKeyInput').value.trim();if(!k)return;await api('POST','/admin/add',{key:k});document.getElementById('addKeyInput').value='';showToast('Key added');loadKeys()}
-async function deleteKey(k){if(!confirm('Delete '+k+'?'))return;await api('POST','/admin/delete',{key:k});showToast('Deleted');loadKeys()}
-async function resetKey(k){await api('POST','/admin/reset',{key:k});showToast('HWID reset');loadKeys()}
+async function loadKeys(){try{const r=await api('GET','/admin/keys');renderKeys(r.keys);showToast('Refreshed')}catch(e){showToast('Error: '+e.message)}}
+async function generateKeys(){try{const c=parseInt(document.getElementById('genCount').value)||5;await api('POST','/admin/generate',{count:c});showToast(c+' keys generated');await loadKeys()}catch(e){showToast('Error: '+e.message)}}
+async function addKey(){try{const k=document.getElementById('addKeyInput').value.trim();if(!k)return;await api('POST','/admin/add',{key:k});document.getElementById('addKeyInput').value='';showToast('Key added');await loadKeys()}catch(e){showToast('Error: '+e.message)}}
+async function deleteKey(k){try{const r=await api('POST','/admin/delete',{key:k});showToast(r.status==='deleted'?'Deleted!':'Error: '+r.status);await loadKeys()}catch(e){showToast('Error: '+e.message)}}
+async function resetKey(k){try{const r=await api('POST','/admin/reset',{key:k});showToast(r.status==='reset'?'HWID reset!':'Error: '+r.status);await loadKeys()}catch(e){showToast('Error: '+e.message)}}
 
 document.getElementById('passInput').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin()});
 </script>
