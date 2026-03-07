@@ -10,10 +10,60 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'riphack_admin_2026';
 const PORT = process.env.PORT || 3000;
 const DB_FILE = path.join(__dirname, 'keys.json');
 const SERVER_KEY_FILE = path.join(__dirname, 'server_key.txt');
+const KEYS_TXT_FILE = path.join(__dirname, '..', 'keys.txt');
 
 function loadDB() { try { return JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); } catch { return { keys: {}, serverKey: '' }; } }
 function saveDB(db) { fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2)); }
 if (!fs.existsSync(DB_FILE)) saveDB({ keys: {}, serverKey: '' });
+
+// ===== Автоимпорт ключей из keys.txt =====
+function importKeysFromTxt() {
+  try {
+    if (!fs.existsSync(KEYS_TXT_FILE)) return;
+    const content = fs.readFileSync(KEYS_TXT_FILE, 'utf8').trim();
+    if (!content) return;
+    const lines = content.split(/\r?\n/).filter(l => l.trim());
+    const db = loadDB();
+    let imported = 0;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      // Формат: KEY или KEY:HWID
+      const parts = trimmed.split(':');
+      let key, hwid = '';
+      if (parts.length >= 4) {
+        // Формат RIP-XXXX-XXXX-XXXX:HWID — ключ содержит дефисы, HWID после последнего двоеточия
+        // Ключ: всё до последнего ':' если после ':' идёт формат HWID (XXXXXXXX-XXXXXXXX)
+        const lastColon = trimmed.lastIndexOf(':');
+        const possibleHwid = trimmed.substring(lastColon + 1);
+        if (/^[A-F0-9]{8}-[A-F0-9]{8}$/i.test(possibleHwid)) {
+          key = trimmed.substring(0, lastColon);
+          hwid = possibleHwid;
+        } else {
+          key = trimmed;
+        }
+      } else {
+        key = trimmed;
+      }
+      if (!db.keys[key]) {
+        db.keys[key] = { hwid: hwid, activatedAt: hwid ? new Date().toISOString() : null };
+        imported++;
+      } else if (hwid && !db.keys[key].hwid) {
+        // Обновить HWID если в txt он есть, а в базе — нет
+        db.keys[key].hwid = hwid;
+        db.keys[key].activatedAt = db.keys[key].activatedAt || new Date().toISOString();
+        imported++;
+      }
+    }
+    if (imported > 0) {
+      saveDB(db);
+      console.log(`[RIP Hack] Импортировано ${imported} ключей из keys.txt`);
+    }
+  } catch (e) {
+    console.error('[RIP Hack] Ошибка импорта keys.txt:', e.message);
+  }
+}
+importKeysFromTxt();
 
 // Загрузить серверный ключ из файла (если есть)
 function getServerKey() {
@@ -71,8 +121,16 @@ function adminAuth(req, res, next) {
 app.get('/admin/keys', adminAuth, (req, res) => {
   const db = loadDB();
   const keys = Object.entries(db.keys).map(([key, d]) => ({
-    key, hwid: d.hwid || null, activatedAt: d.activatedAt || null
+    key,
+    hwid: (d.hwid && d.hwid.length > 0) ? d.hwid : null,
+    activatedAt: d.activatedAt || null
   }));
+  // Сортировка: сначала активные (с HWID), потом свободные
+  keys.sort((a, b) => {
+    if (a.hwid && !b.hwid) return -1;
+    if (!a.hwid && b.hwid) return 1;
+    return 0;
+  });
   const serverKey = getServerKey();
   res.json({ keys, serverKey: serverKey || null });
 });
@@ -194,6 +252,9 @@ tr:hover td{background:#12121e}
 .badge-free{background:#50dc8218;color:#50dc82;border:1px solid #50dc8240}
 .badge-bound{background:#ffce3e18;color:#ffce3e;border:1px solid #ffce3e40}
 .actions{display:flex;gap:6px}
+.filter-btn{background:transparent;border:1px solid #32324a;color:#78789a;transition:all .25s}
+.filter-btn:hover{border-color:#8250ff;color:#8250ff}
+.filter-btn.active{background:linear-gradient(135deg,#8250ff22,#6930d422);border-color:#8250ff;color:#8250ff}
 .server-key-status{font-family:Consolas,monospace;font-size:12px;padding:8px 14px;background:#0e0e1a;border:1px solid #28284a;border-radius:8px;color:#50dc82;word-break:break-all}
 .server-key-status.missing{color:#ff5050;border-color:#ff505040}
 .toast{position:fixed;bottom:24px;right:24px;background:linear-gradient(135deg,#1a1a2e,#22223a);border:1px solid #8250ff;border-radius:12px;padding:14px 22px;color:#fff;font-size:14px;z-index:999;animation:slideIn .3s;box-shadow:0 8px 24px rgba(130,80,255,0.2)}
@@ -240,6 +301,12 @@ tr:hover td{background:#12121e}
         <input type="text" id="addKeyInput" placeholder="RIP-XXXXXXXX-XXXXXXXX-XXXXXXXX" style="min-width:250px">
         <button class="btn btn-primary btn-sm" onclick="addKey()">Добавить</button>
         <button class="btn btn-outline btn-sm" onclick="loadKeys()">&#8635; Обновить</button>
+      </div>
+      <div class="toolbar" style="margin-top:-8px">
+        <button class="btn btn-sm filter-btn active" id="filterAll" onclick="setFilter('all')" style="padding:6px 16px;font-size:11px">Все</button>
+        <button class="btn btn-sm filter-btn" id="filterActive" onclick="setFilter('active')" style="padding:6px 16px;font-size:11px">&#9679; Активные</button>
+        <button class="btn btn-sm filter-btn" id="filterFree" onclick="setFilter('free')" style="padding:6px 16px;font-size:11px">&#9675; Свободные</button>
+        <input type="text" id="searchInput" placeholder="Поиск по ключу или HWID..." oninput="applyFilter()" style="flex:1;min-width:160px;padding:6px 12px;font-size:12px">
       </div>
       <table>
         <thead><tr><th>Ключ</th><th>Статус</th><th>HWID</th><th>Активирован</th><th>Действия</th></tr></thead>
@@ -288,12 +355,40 @@ function renderServerKey(sk){
   }
 }
 
+let allKeys=[];
+let currentFilter='all';
+
 function renderKeys(keys){
+  if(!keys||!Array.isArray(keys)){keys=[];}
+  allKeys=keys;
   document.getElementById('totalKeys').textContent=keys.length;
   document.getElementById('activeKeys').textContent=keys.filter(k=>k.hwid).length;
   document.getElementById('freeKeys').textContent=keys.filter(k=>!k.hwid).length;
+  applyFilter();
+}
+
+function setFilter(f){
+  currentFilter=f;
+  document.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById(f==='all'?'filterAll':f==='active'?'filterActive':'filterFree').classList.add('active');
+  applyFilter();
+}
+
+function applyFilter(){
+  let filtered=allKeys;
+  if(currentFilter==='active') filtered=allKeys.filter(k=>k.hwid);
+  else if(currentFilter==='free') filtered=allKeys.filter(k=>!k.hwid);
+  const search=(document.getElementById('searchInput')||{}).value||'';
+  if(search.trim()){
+    const q=search.trim().toLowerCase();
+    filtered=filtered.filter(k=>k.key.toLowerCase().includes(q)||(k.hwid&&k.hwid.toLowerCase().includes(q)));
+  }
   const tb=document.getElementById('keysTable');
-  tb.innerHTML=keys.map(k=>\`<tr>
+  if(filtered.length===0){
+    tb.innerHTML='<tr><td colspan="5" style="text-align:center;color:#78789a;padding:24px">Нет ключей для отображения</td></tr>';
+    return;
+  }
+  tb.innerHTML=filtered.map(k=>\`<tr>
     <td class="key-text \${k.hwid?'used':''}" onclick="navigator.clipboard.writeText('\${k.key}');showToast('Скопировано!')">\${k.key}</td>
     <td><span class="badge \${k.hwid?'badge-bound':'badge-free'}">\${k.hwid?'ПРИВЯЗАН':'СВОБОДЕН'}</span></td>
     <td class="hwid">\${k.hwid||'—'}</td>
@@ -305,7 +400,7 @@ function renderKeys(keys){
   </tr>\`).join('');
 }
 
-async function loadKeys(){try{const r=await api('GET','/admin/keys');renderKeys(r.keys);renderServerKey(r.serverKey);showToast('Обновлено')}catch(e){showToast('Ошибка: '+e.message)}}
+async function loadKeys(){try{const r=await api('GET','/admin/keys');renderKeys(r.keys||[]);renderServerKey(r.serverKey);showToast('Обновлено')}catch(e){showToast('Ошибка: '+e.message)}}
 async function generateKeys(){try{const c=parseInt(document.getElementById('genCount').value)||5;await api('POST','/admin/generate',{count:c});showToast(c+' ключей сгенерировано');await loadKeys()}catch(e){showToast('Ошибка: '+e.message)}}
 async function addKey(){try{const k=document.getElementById('addKeyInput').value.trim();if(!k)return;await api('POST','/admin/add',{key:k});document.getElementById('addKeyInput').value='';showToast('Ключ добавлен');await loadKeys()}catch(e){showToast('Ошибка: '+e.message)}}
 async function deleteKey(k){try{const r=await api('POST','/admin/delete',{key:k});showToast(r.status==='deleted'?'Удалён!':'Ошибка: '+r.status);await loadKeys()}catch(e){showToast('Ошибка: '+e.message)}}
