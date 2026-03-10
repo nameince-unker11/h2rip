@@ -2,79 +2,100 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const mongoose = require('mongoose');
+require('dotenv').config();
 
 const app = express();
 app.use(express.json());
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'riphack_admin_2026';
 const PORT = process.env.PORT || 3000;
-const DB_FILE = path.join(__dirname, 'keys.json');
-const SERVER_KEY_FILE = path.join(__dirname, 'server_key.txt');
 const KEYS_TXT_FILE = path.join(__dirname, '..', 'keys.txt');
 
-function loadDB() { try { return JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); } catch { return { keys: {}, serverKey: '' }; } }
-function saveDB(db) { fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2)); }
-if (!fs.existsSync(DB_FILE)) saveDB({ keys: {}, serverKey: '' });
+// ===== MongoDB Atlas URI =====
+// Установи через переменную окружения MONGODB_URI или замени строку ниже
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://<USER>:<PASSWORD>@<CLUSTER>.mongodb.net/riphack?retryWrites=true&w=majority';
+
+// ===== Mongoose Схемы =====
+const keySchema = new mongoose.Schema({
+  key: { type: String, required: true, unique: true, index: true },
+  hwid: { type: String, default: '' },
+  activatedAt: { type: Date, default: null }
+}, { timestamps: true });
+
+const settingSchema = new mongoose.Schema({
+  name: { type: String, required: true, unique: true },
+  value: { type: String, default: '' }
+});
+
+const Key = mongoose.model('Key', keySchema);
+const Setting = mongoose.model('Setting', settingSchema);
 
 // ===== Автоимпорт ключей из keys.txt =====
-function importKeysFromTxt() {
+async function importKeysFromTxt() {
   try {
     if (!fs.existsSync(KEYS_TXT_FILE)) return;
     const content = fs.readFileSync(KEYS_TXT_FILE, 'utf8').trim();
     if (!content) return;
     const lines = content.split(/\r?\n/).filter(l => l.trim());
-    const db = loadDB();
     let imported = 0;
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed) continue;
       // Формат: KEY или KEY:HWID
       const parts = trimmed.split(':');
-      let key, hwid = '';
+      let keyStr, hwid = '';
       if (parts.length >= 4) {
         // Формат RIP-XXXX-XXXX-XXXX:HWID — ключ содержит дефисы, HWID после последнего двоеточия
-        // Ключ: всё до последнего ':' если после ':' идёт формат HWID (XXXXXXXX-XXXXXXXX)
         const lastColon = trimmed.lastIndexOf(':');
         const possibleHwid = trimmed.substring(lastColon + 1);
         if (/^[A-F0-9]{8}-[A-F0-9]{8}$/i.test(possibleHwid)) {
-          key = trimmed.substring(0, lastColon);
+          keyStr = trimmed.substring(0, lastColon);
           hwid = possibleHwid;
         } else {
-          key = trimmed;
+          keyStr = trimmed;
         }
       } else {
-        key = trimmed;
+        keyStr = trimmed;
       }
-      if (!db.keys[key]) {
-        db.keys[key] = { hwid: hwid, activatedAt: hwid ? new Date().toISOString() : null };
+
+      const existing = await Key.findOne({ key: keyStr });
+      if (!existing) {
+        await Key.create({
+          key: keyStr,
+          hwid: hwid,
+          activatedAt: hwid ? new Date() : null
+        });
         imported++;
-      } else if (hwid && !db.keys[key].hwid) {
-        // Обновить HWID если в txt он есть, а в базе — нет
-        db.keys[key].hwid = hwid;
-        db.keys[key].activatedAt = db.keys[key].activatedAt || new Date().toISOString();
+      } else if (hwid && !existing.hwid) {
+        existing.hwid = hwid;
+        existing.activatedAt = existing.activatedAt || new Date();
+        await existing.save();
         imported++;
       }
     }
     if (imported > 0) {
-      saveDB(db);
       console.log(`[RIP Hack] Импортировано ${imported} ключей из keys.txt`);
     }
   } catch (e) {
     console.error('[RIP Hack] Ошибка импорта keys.txt:', e.message);
   }
 }
-importKeysFromTxt();
 
-// Загрузить серверный ключ из файла (если есть)
-function getServerKey() {
-  const db = loadDB();
-  if (db.serverKey) return db.serverKey;
+// ===== Загрузить серверный ключ =====
+async function getServerKey() {
+  const setting = await Setting.findOne({ name: 'serverKey' });
+  if (setting && setting.value) return setting.value;
   // Попробовать прочитать из файла server_key.txt
+  const SERVER_KEY_FILE = path.join(__dirname, 'server_key.txt');
   try {
     const sk = fs.readFileSync(SERVER_KEY_FILE, 'utf8').trim();
     if (sk.length >= 32) {
-      db.serverKey = sk;
-      saveDB(db);
+      await Setting.findOneAndUpdate(
+        { name: 'serverKey' },
+        { value: sk },
+        { upsert: true }
+      );
       return sk;
     }
   } catch { }
@@ -82,32 +103,41 @@ function getServerKey() {
 }
 
 // ===== PUBLIC: Активация ключа =====
-app.post('/validate', (req, res) => {
-  const { key, hwid } = req.body;
-  if (!key || !hwid) return res.json({ status: 'invalid' });
-  const db = loadDB();
-  const entry = db.keys[key];
-  if (!entry) return res.json({ status: 'invalid' });
+app.post('/validate', async (req, res) => {
+  try {
+    const { key, hwid } = req.body;
+    if (!key || !hwid) return res.json({ status: 'invalid' });
 
-  if (!entry.hwid) {
-    entry.hwid = hwid;
-    entry.activatedAt = new Date().toISOString();
-    db.keys[key] = entry;
-    saveDB(db);
-    return res.json({ status: 'activated' });
+    const entry = await Key.findOne({ key });
+    if (!entry) return res.json({ status: 'invalid' });
+
+    if (!entry.hwid) {
+      entry.hwid = hwid;
+      entry.activatedAt = new Date();
+      await entry.save();
+      return res.json({ status: 'activated' });
+    }
+    if (entry.hwid === hwid) return res.json({ status: 'ok' });
+    return res.json({ status: 'bound' });
+  } catch (e) {
+    console.error('[validate]', e.message);
+    res.status(500).json({ status: 'error' });
   }
-  if (entry.hwid === hwid) return res.json({ status: 'ok' });
-  return res.json({ status: 'bound' });
 });
 
 // ===== PUBLIC: Проверка ключа =====
-app.post('/check', (req, res) => {
-  const { key, hwid } = req.body;
-  if (!key || !hwid) return res.json({ valid: false });
-  const db = loadDB();
-  const entry = db.keys[key];
-  const isValid = !!(entry && entry.hwid === hwid);
-  return res.json({ valid: isValid });
+app.post('/check', async (req, res) => {
+  try {
+    const { key, hwid } = req.body;
+    if (!key || !hwid) return res.json({ valid: false });
+
+    const entry = await Key.findOne({ key });
+    const isValid = !!(entry && entry.hwid === hwid);
+    return res.json({ valid: isValid });
+  } catch (e) {
+    console.error('[check]', e.message);
+    res.status(500).json({ valid: false });
+  }
 });
 
 // ===== ADMIN: Авторизация =====
@@ -118,89 +148,121 @@ function adminAuth(req, res, next) {
 }
 
 // Получить все ключи
-app.get('/admin/keys', adminAuth, (req, res) => {
-  const db = loadDB();
-  const keys = Object.entries(db.keys).map(([key, d]) => ({
-    key,
-    hwid: (d.hwid && d.hwid.length > 0) ? d.hwid : null,
-    activatedAt: d.activatedAt || null
-  }));
-  // Сортировка: сначала активные (с HWID), потом свободные
-  keys.sort((a, b) => {
-    if (a.hwid && !b.hwid) return -1;
-    if (!a.hwid && b.hwid) return 1;
-    return 0;
-  });
-  const serverKey = getServerKey();
-  res.json({ keys, serverKey: serverKey || null });
+app.get('/admin/keys', adminAuth, async (req, res) => {
+  try {
+    const keysRaw = await Key.find({}).lean();
+    const keys = keysRaw.map(d => ({
+      key: d.key,
+      hwid: (d.hwid && d.hwid.length > 0) ? d.hwid : null,
+      activatedAt: d.activatedAt || null
+    }));
+    // Сортировка: сначала активные (с HWID), потом свободные
+    keys.sort((a, b) => {
+      if (a.hwid && !b.hwid) return -1;
+      if (!a.hwid && b.hwid) return 1;
+      return 0;
+    });
+    const serverKey = await getServerKey();
+    res.json({ keys, serverKey: serverKey || null });
+  } catch (e) {
+    console.error('[admin/keys]', e.message);
+    res.status(500).json({ error: 'Database error' });
+  }
 });
 
 // Добавить один ключ
-app.post('/admin/add', adminAuth, (req, res) => {
-  const { key } = req.body;
-  if (!key) return res.status(400).json({ error: 'Key required' });
-  const db = loadDB();
-  if (db.keys[key]) return res.json({ status: 'exists' });
-  db.keys[key] = { hwid: '', activatedAt: null };
-  saveDB(db);
-  res.json({ status: 'added', key });
+app.post('/admin/add', adminAuth, async (req, res) => {
+  try {
+    const { key } = req.body;
+    if (!key) return res.status(400).json({ error: 'Key required' });
+
+    const exists = await Key.findOne({ key });
+    if (exists) return res.json({ status: 'exists' });
+
+    await Key.create({ key, hwid: '', activatedAt: null });
+    res.json({ status: 'added', key });
+  } catch (e) {
+    console.error('[admin/add]', e.message);
+    res.status(500).json({ error: 'Database error' });
+  }
 });
 
 // Сгенерировать ключи (формат: RIP-XXXXXXXX-XXXXXXXX-XXXXXXXX)
-app.post('/admin/generate', adminAuth, (req, res) => {
-  const count = Math.min(req.body.count || 1, 100);
-  const db = loadDB();
-  const generated = [];
-  for (let i = 0; i < count; i++) {
-    const buf = crypto.randomBytes(12);
-    const part1 = buf.slice(0, 4).toString('hex').toUpperCase();
-    const part2 = buf.slice(4, 8).toString('hex').toUpperCase();
-    const part3 = buf.slice(8, 12).toString('hex').toUpperCase();
-    const key = `RIP-${part1}-${part2}-${part3}`;
-    db.keys[key] = { hwid: '', activatedAt: null };
-    generated.push(key);
+app.post('/admin/generate', adminAuth, async (req, res) => {
+  try {
+    const count = Math.min(req.body.count || 1, 100);
+    const generated = [];
+    const bulkOps = [];
+    for (let i = 0; i < count; i++) {
+      const buf = crypto.randomBytes(12);
+      const part1 = buf.slice(0, 4).toString('hex').toUpperCase();
+      const part2 = buf.slice(4, 8).toString('hex').toUpperCase();
+      const part3 = buf.slice(8, 12).toString('hex').toUpperCase();
+      const key = `RIP-${part1}-${part2}-${part3}`;
+      bulkOps.push({ key, hwid: '', activatedAt: null });
+      generated.push(key);
+    }
+    await Key.insertMany(bulkOps, { ordered: false });
+    res.json({ status: 'ok', generated });
+  } catch (e) {
+    console.error('[admin/generate]', e.message);
+    res.status(500).json({ error: 'Database error' });
   }
-  saveDB(db);
-  res.json({ status: 'ok', generated });
 });
 
 // Удалить ключ
-app.post('/admin/delete', adminAuth, (req, res) => {
-  const { key } = req.body;
-  const db = loadDB();
-  if (!db.keys[key]) return res.json({ status: 'not_found' });
-  delete db.keys[key];
-  saveDB(db);
-  res.json({ status: 'deleted' });
+app.post('/admin/delete', adminAuth, async (req, res) => {
+  try {
+    const { key } = req.body;
+    const result = await Key.deleteOne({ key });
+    if (result.deletedCount === 0) return res.json({ status: 'not_found' });
+    res.json({ status: 'deleted' });
+  } catch (e) {
+    console.error('[admin/delete]', e.message);
+    res.status(500).json({ error: 'Database error' });
+  }
 });
 
 // Сбросить HWID ключа
-app.post('/admin/reset', adminAuth, (req, res) => {
-  const { key } = req.body;
-  const db = loadDB();
-  if (!db.keys[key]) return res.json({ status: 'not_found' });
-  db.keys[key].hwid = '';
-  db.keys[key].activatedAt = null;
-  saveDB(db);
-  res.json({ status: 'reset' });
+app.post('/admin/reset', adminAuth, async (req, res) => {
+  try {
+    const { key } = req.body;
+    const entry = await Key.findOne({ key });
+    if (!entry) return res.json({ status: 'not_found' });
+    entry.hwid = '';
+    entry.activatedAt = null;
+    await entry.save();
+    res.json({ status: 'reset' });
+  } catch (e) {
+    console.error('[admin/reset]', e.message);
+    res.status(500).json({ error: 'Database error' });
+  }
 });
 
 // Установить серверный ключ дешифрования
-app.post('/admin/server-key', adminAuth, (req, res) => {
-  const { server_key } = req.body;
-  if (!server_key || server_key.length < 32) {
-    return res.status(400).json({ error: 'server_key должен быть hex-строкой из 32+ символов' });
+app.post('/admin/server-key', adminAuth, async (req, res) => {
+  try {
+    const { server_key } = req.body;
+    if (!server_key || server_key.length < 32) {
+      return res.status(400).json({ error: 'server_key должен быть hex-строкой из 32+ символов' });
+    }
+    if (!/^[0-9a-fA-F]+$/.test(server_key)) {
+      return res.status(400).json({ error: 'server_key должен содержать только hex-символы' });
+    }
+    const normalizedKey = server_key.toLowerCase();
+    await Setting.findOneAndUpdate(
+      { name: 'serverKey' },
+      { value: normalizedKey },
+      { upsert: true }
+    );
+    // Также сохранить в файл (для совместимости)
+    const SERVER_KEY_FILE = path.join(__dirname, 'server_key.txt');
+    fs.writeFileSync(SERVER_KEY_FILE, normalizedKey);
+    res.json({ status: 'ok', message: 'Серверный ключ обновлён' });
+  } catch (e) {
+    console.error('[admin/server-key]', e.message);
+    res.status(500).json({ error: 'Database error' });
   }
-  // Проверить что это валидный hex
-  if (!/^[0-9a-fA-F]+$/.test(server_key)) {
-    return res.status(400).json({ error: 'server_key должен содержать только hex-символы' });
-  }
-  const db = loadDB();
-  db.serverKey = server_key.toLowerCase();
-  saveDB(db);
-  // Также сохранить в файл
-  fs.writeFileSync(SERVER_KEY_FILE, server_key.toLowerCase());
-  res.json({ status: 'ok', message: 'Серверный ключ обновлён' });
 });
 
 // ===== АДМИН-ПАНЕЛЬ =====
@@ -260,13 +322,14 @@ tr:hover td{background:#12121e}
 .toast{position:fixed;bottom:24px;right:24px;background:linear-gradient(135deg,#1a1a2e,#22223a);border:1px solid #8250ff;border-radius:12px;padding:14px 22px;color:#fff;font-size:14px;z-index:999;animation:slideIn .3s;box-shadow:0 8px 24px rgba(130,80,255,0.2)}
 @keyframes slideIn{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:translateX(0)}}
 .hidden{display:none}
+.db-badge{display:inline-block;background:#50dc8220;color:#50dc82;border:1px solid #50dc8240;padding:3px 10px;border-radius:8px;font-size:11px;font-weight:600;margin-left:8px}
 </style>
 </head>
 <body>
 <div class="container">
   <div class="header">
     <h1>&#9670; RIP HACK</h1>
-    <div class="sub">АДМИН-ПАНЕЛЬ &bull; FORTRESS v3.0</div>
+    <div class="sub">АДМИН-ПАНЕЛЬ &bull; FORTRESS v3.0 <span class="db-badge">MongoDB Atlas</span></div>
   </div>
 
   <div id="loginSection" class="login-box">
@@ -347,10 +410,10 @@ async function doLogin(){
 function renderServerKey(sk){
   const el=document.getElementById('serverKeyStatus');
   if(sk){
-    el.textContent='✅ '+sk;
+    el.textContent='\u2705 '+sk;
     el.classList.remove('missing');
   }else{
-    el.textContent='⚠️ Не установлен — DLL не расшифруется!';
+    el.textContent='\u26a0\ufe0f Не установлен — DLL не расшифруется!';
     el.classList.add('missing');
   }
 }
@@ -391,8 +454,8 @@ function applyFilter(){
   tb.innerHTML=filtered.map(k=>\`<tr>
     <td class="key-text \${k.hwid?'used':''}" onclick="navigator.clipboard.writeText('\${k.key}');showToast('Скопировано!')">\${k.key}</td>
     <td><span class="badge \${k.hwid?'badge-bound':'badge-free'}">\${k.hwid?'ПРИВЯЗАН':'СВОБОДЕН'}</span></td>
-    <td class="hwid">\${k.hwid||'—'}</td>
-    <td style="color:#78789a;font-size:12px">\${k.activatedAt?new Date(k.activatedAt).toLocaleString():'—'}</td>
+    <td class="hwid">\${k.hwid||'\u2014'}</td>
+    <td style="color:#78789a;font-size:12px">\${k.activatedAt?new Date(k.activatedAt).toLocaleString():'\u2014'}</td>
     <td class="actions">
       \${k.hwid?\`<button class="btn btn-outline btn-sm" onclick="resetKey('\${k.key}')">Сброс</button>\`:''}
       <button class="btn btn-danger btn-sm" onclick="deleteKey('\${k.key}')">Удалить</button>
@@ -427,6 +490,23 @@ if(PASS){api('GET','/admin/keys').then(r=>{if(!r.error){document.getElementById(
 </html>`);
 });
 
-app.get('/', (req, res) => res.json({ name: 'RIP Hack Key Server', version: '3.0', status: 'online' }));
+app.get('/', (req, res) => res.json({ name: 'RIP Hack Key Server', version: '3.0', db: 'MongoDB Atlas', status: 'online' }));
 
-app.listen(PORT, () => console.log(`[RIP Hack] Сервер ключей запущен на порту ${PORT}`));
+// ===== Запуск сервера =====
+async function startServer() {
+  try {
+    console.log('[RIP Hack] Подключение к MongoDB Atlas...');
+    await mongoose.connect(MONGODB_URI);
+    console.log('[RIP Hack] ✅ MongoDB Atlas подключена!');
+
+    // Импорт ключей из keys.txt при старте
+    await importKeysFromTxt();
+
+    app.listen(PORT, () => console.log(`[RIP Hack] Сервер ключей запущен на порту ${PORT}`));
+  } catch (e) {
+    console.error('[RIP Hack] ❌ Ошибка подключения к MongoDB:', e.message);
+    process.exit(1);
+  }
+}
+
+startServer();
