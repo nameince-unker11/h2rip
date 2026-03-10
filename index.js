@@ -346,15 +346,6 @@ tr:hover td{background:#12121e}
       <div class="stat"><div class="num" id="freeKeys">0</div><div class="label">Свободно</div></div>
     </div>
 
-    <div class="card">
-      <h3>&#128272; Серверный ключ DLL</h3>
-      <p style="font-size:13px;color:#78789a;margin-bottom:12px">Без этого ключа клиент не сможет расшифровать DLL. Вставьте содержимое <code>server_key.txt</code> после сборки.</p>
-      <div id="serverKeyStatus" class="server-key-status missing">Не установлен</div>
-      <div style="margin-top:12px;display:flex;gap:10px;align-items:center">
-        <input type="text" id="serverKeyInput" placeholder="Вставьте hex из server_key.txt (32 символа)" style="flex:1;font-family:Consolas,monospace">
-        <button class="btn btn-warn btn-sm" onclick="setServerKey()">&#128273; Установить</button>
-      </div>
-    </div>
 
     <div class="card">
       <h3>&#128273; Управление ключами</h3>
@@ -403,20 +394,10 @@ async function doLogin(){
     document.getElementById('loginSection').classList.add('hidden');
     document.getElementById('mainSection').classList.remove('hidden');
     renderKeys(r.keys);
-    renderServerKey(r.serverKey);
   }catch(e){document.getElementById('loginErr').textContent='Ошибка подключения';document.getElementById('loginErr').classList.remove('hidden')}
 }
 
-function renderServerKey(sk){
-  const el=document.getElementById('serverKeyStatus');
-  if(sk){
-    el.textContent='\u2705 '+sk;
-    el.classList.remove('missing');
-  }else{
-    el.textContent='\u26a0\ufe0f Не установлен — DLL не расшифруется!';
-    el.classList.add('missing');
-  }
-}
+
 
 let allKeys=[];
 let currentFilter='all';
@@ -463,28 +444,18 @@ function applyFilter(){
   </tr>\`).join('');
 }
 
-async function loadKeys(){try{const r=await api('GET','/admin/keys');renderKeys(r.keys||[]);renderServerKey(r.serverKey);showToast('Обновлено')}catch(e){showToast('Ошибка: '+e.message)}}
+async function loadKeys(){try{const r=await api('GET','/admin/keys');renderKeys(r.keys||[]);showToast('Обновлено')}catch(e){showToast('Ошибка: '+e.message)}}
 async function generateKeys(){try{const c=parseInt(document.getElementById('genCount').value)||5;await api('POST','/admin/generate',{count:c});showToast(c+' ключей сгенерировано');await loadKeys()}catch(e){showToast('Ошибка: '+e.message)}}
 async function addKey(){try{const k=document.getElementById('addKeyInput').value.trim();if(!k)return;await api('POST','/admin/add',{key:k});document.getElementById('addKeyInput').value='';showToast('Ключ добавлен');await loadKeys()}catch(e){showToast('Ошибка: '+e.message)}}
 async function deleteKey(k){try{const r=await api('POST','/admin/delete',{key:k});showToast(r.status==='deleted'?'Удалён!':'Ошибка: '+r.status);await loadKeys()}catch(e){showToast('Ошибка: '+e.message)}}
 async function resetKey(k){try{const r=await api('POST','/admin/reset',{key:k});showToast(r.status==='reset'?'HWID сброшен!':'Ошибка: '+r.status);await loadKeys()}catch(e){showToast('Ошибка: '+e.message)}}
 
-async function setServerKey(){
-  const sk=document.getElementById('serverKeyInput').value.trim();
-  if(!sk||sk.length<32){showToast('Ошибка: нужна hex-строка из 32 символов');return}
-  try{
-    const r=await api('POST','/admin/server-key',{server_key:sk});
-    if(r.error){showToast('Ошибка: '+r.error);return}
-    showToast('Серверный ключ установлен!');
-    document.getElementById('serverKeyInput').value='';
-    await loadKeys();
-  }catch(e){showToast('Ошибка: '+e.message)}
-}
+
 
 document.getElementById('passInput').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin()});
 
 // Авто-логин если пароль сохранён
-if(PASS){api('GET','/admin/keys').then(r=>{if(!r.error){document.getElementById('loginSection').classList.add('hidden');document.getElementById('mainSection').classList.remove('hidden');renderKeys(r.keys);renderServerKey(r.serverKey)}else{PASS='';sessionStorage.removeItem('riphack_pass')}}).catch(()=>{})}
+if(PASS){api('GET','/admin/keys').then(r=>{if(!r.error){document.getElementById('loginSection').classList.add('hidden');document.getElementById('mainSection').classList.remove('hidden');renderKeys(r.keys)}else{PASS='';sessionStorage.removeItem('riphack_pass')}}).catch(()=>{})}
 </script>
 </body>
 </html>`);
